@@ -1,0 +1,1728 @@
+-- Taiga hub v0.1
+-- Original script by https://github.com/mstudio45/LinoriaLib/blob/main/Example.lua
+-- Modified and customized - Includes Kill All + Anti-Kick/Anti-Grab/Anti-Lag + Blob Kick + Blobman Kick All + Third Person + Infinite Jump
+
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+local Window = Library:CreateWindow({
+	Title = "Taiga hub v0.1",
+	Footer = "version: 0.1",
+	Icon = 95816097006870,
+	NotifySide = "Right",
+	ShowCustomCursor = true,
+})
+
+-- =====================================================
+-- ★★★ タブ順序: Main → 防御 → キック → Kill → プレイヤー → UI Settings ★★★
+-- =====================================================
+local Tabs = {
+	Main = Window:AddTab("Main", "user"),
+	Defense = Window:AddTab("防御", "shield"),
+	Kick = Window:AddTab("キック", "footprints"),
+	Kill = Window:AddTab("Kill", "swords"),
+	Player = Window:AddTab("プレイヤー", "user"),
+	["UI Settings"] = Window:AddTab("UI Settings", "settings"),
+}
+
+-- =====================================================
+-- Kill All 機能 (Killタブ用)
+-- =====================================================
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Camera = Workspace.CurrentCamera
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local isRunning = false
+local killTask = nil
+local currentBlobman = nil
+local maxRetries = 5
+local TP_WAIT = 0.02
+local GRAB_WAIT = 0.005
+
+-- 視点切り替え処理 (Kill用)
+local function EnableThirdPersonKill()
+	pcall(function()
+		LocalPlayer.CameraMode = Enum.CameraMode.Classic
+		Camera.CameraType = Enum.CameraType.Custom
+		if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+			Camera.CameraSubject = LocalPlayer.Character.Humanoid
+		end
+		LocalPlayer.CameraMaxZoomDistance = 100
+		LocalPlayer.CameraMinZoomDistance = 0.5
+	end)
+end
+
+local function DisableThirdPersonKill()
+	pcall(function()
+		LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+		Camera.CameraType = Enum.CameraType.Custom
+		if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+			Camera.CameraSubject = LocalPlayer.Character.Humanoid
+		end
+		LocalPlayer.CameraMaxZoomDistance = 0
+		LocalPlayer.CameraMinZoomDistance = 0
+	end)
+end
+
+-- ブロブマン関連処理 (Kill用)
+local function MountBlobman(blobman)
+	if not blobman then return false end
+	local char = LocalPlayer.Character
+	if not char then return false end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return false end
+
+	if humanoid.SeatPart and humanoid.SeatPart.Parent == blobman then
+		return true
+	end
+
+	local seat = blobman:FindFirstChild("VehicleSeat")
+	if not seat then
+		for _, child in ipairs(blobman:GetDescendants()) do
+			if child:IsA("VehicleSeat") or child:IsA("Seat") then
+				seat = child
+				break
+			end
+		end
+	end
+
+	if not seat then return false end
+	local rootPart = char:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return false end
+
+	rootPart.CFrame = seat.CFrame + Vector3.new(0, 1.5, 0)
+	rootPart.Velocity = Vector3.zero
+	rootPart.RotVelocity = Vector3.zero
+	task.wait(0.1)
+
+	for i = 1, 5 do
+		pcall(function() seat:Sit(humanoid) end)
+		task.wait(0.1)
+		if humanoid.SeatPart == seat then return true end
+		rootPart.CFrame = seat.CFrame + Vector3.new(0, 1.5 + (i * 0.2), 0)
+		task.wait(0.1)
+	end
+
+	return humanoid.SeatPart == seat
+end
+
+local function GetSeatedBlobman()
+	local char = LocalPlayer.Character
+	if not char then return nil end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return nil end
+	local seat = humanoid.SeatPart
+	if not seat or not seat:IsA("VehicleSeat") then return nil end
+	local obj = seat
+	while obj do
+		if obj:IsA("Model") and obj.Name == "CreatureBlobman" then return obj end
+		obj = obj.Parent
+	end
+	return nil
+end
+
+local function SpawnBlobmanForKill()
+	local seated = GetSeatedBlobman()
+	if seated then 
+		currentBlobman = seated 
+		return seated 
+	end
+
+	if currentBlobman and currentBlobman.Parent then
+		local blobPos = nil
+		if currentBlobman.PrimaryPart then
+			blobPos = currentBlobman.PrimaryPart.Position
+		else
+			local part = currentBlobman:FindFirstChildWhichIsA("BasePart")
+			if part then blobPos = part.Position end
+		end
+		local char = LocalPlayer.Character
+		local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+		local localPos = rootPart and rootPart.Position
+		if blobPos and localPos and (blobPos - localPos).Magnitude < 500 then
+			if MountBlobman(currentBlobman) then return currentBlobman end
+		else
+			pcall(function() currentBlobman:Destroy() end)
+			currentBlobman = nil
+		end
+	end
+
+	local char = LocalPlayer.Character
+	if not char then return nil end
+	local rootPart = char:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return nil end
+
+	local spawnRemote = ReplicatedStorage:FindFirstChild("MenuToys") and ReplicatedStorage.MenuToys:FindFirstChild("SpawnToyRemoteFunction")
+	if not spawnRemote then return nil end
+
+	local blobman = nil
+	for attempt = 1, 5 do
+		local spawnPos = rootPart.CFrame * CFrame.new(0, 0, -5)
+		pcall(function() 
+			spawnRemote:InvokeServer("CreatureBlobman", spawnPos, Vector3.new(0, 127, 0)) 
+		end)
+		task.wait(0.3)
+		
+		local toyFolderName = LocalPlayer.Name .. "SpawnedInToys"
+		local toyFolder = Workspace:FindFirstChild(toyFolderName)
+		if toyFolder then
+			blobman = toyFolder:FindFirstChild("CreatureBlobman")
+			if blobman then 
+				currentBlobman = blobman
+				break 
+			end
+		end
+		task.wait(0.2)
+	end
+
+	if not blobman then return nil end
+	currentBlobman = blobman
+
+	if MountBlobman(blobman) then return blobman end
+
+	for retry = 1, 3 do
+		pcall(function() 
+			local destroyToy = ReplicatedStorage:FindFirstChild("MenuToys") and ReplicatedStorage.MenuToys:FindFirstChild("DestroyToy")
+			if destroyToy and blobman then
+				destroyToy:FireServer(blobman)
+			end
+		end)
+		task.wait(0.3)
+		
+		local spawnPos = rootPart.CFrame * CFrame.new(0, 0, -5)
+		pcall(function() 
+			spawnRemote:InvokeServer("CreatureBlobman", spawnPos, Vector3.new(0, 127, 0)) 
+		end)
+		task.wait(0.3)
+		
+		local toyFolderName = LocalPlayer.Name .. "SpawnedInToys"
+		local toyFolder = Workspace:FindFirstChild(toyFolderName)
+		if toyFolder then
+			blobman = toyFolder:FindFirstChild("CreatureBlobman")
+			if blobman then
+				currentBlobman = blobman
+				if MountBlobman(blobman) then return blobman end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function KillPlayer(targetPlayer)
+	if not targetPlayer or not targetPlayer.Character then return false end
+	local humanoid = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return false end
+
+	for _ = 1, maxRetries do
+		local success = pcall(function()
+			humanoid.BreakJointsOnDeath = false
+			humanoid:ChangeState(Enum.HumanoidStateType.Dead)
+		end)
+		if success and humanoid.Health <= 0 then return true end
+		task.wait(0.005)
+	end
+	return false
+end
+
+local function GrabRelease(blobman, targetRoot)
+	if not blobman or not targetRoot then return end
+	pcall(function()
+		local script = blobman:FindFirstChild("BlobmanSeatAndOwnerScript")
+		if script then
+			local leftDet = blobman:FindFirstChild("LeftDetector")
+			local leftWeld = leftDet and leftDet:FindFirstChild("LeftWeld")
+			if script:FindFirstChild("CreatureGrab") and leftDet and leftWeld then
+				script.CreatureGrab:FireServer(leftDet, targetRoot, leftWeld)
+			end
+			if script:FindFirstChild("CreatureRelease") and leftDet and leftWeld then
+				script.CreatureRelease:FireServer(leftWeld)
+			end
+		end
+	end)
+end
+
+local function ProcessAllPlayers()
+	local char = LocalPlayer.Character
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+	local rootPart = char.HumanoidRootPart
+
+	local blobman = nil
+	for retry = 1, 10 do
+		blobman = SpawnBlobmanForKill()
+		if blobman then break end
+		task.wait(0.5)
+	end
+	
+	if not blobman then 
+		pcall(function()
+			local humanoid = char:FindFirstChildOfClass("Humanoid")
+			if humanoid then humanoid.Health = 0 end
+		end)
+		task.wait(0.5)
+		return 
+	end
+
+	local targets = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+			table.insert(targets, player)
+		end
+	end
+
+	for _, player in ipairs(targets) do
+		if not isRunning then break end
+
+		local targetChar = player.Character
+		if not targetChar then continue end
+
+		local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+		if not humanoid or humanoid.Health <= 0 then continue end
+
+		local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then continue end
+
+		rootPart.CFrame = targetRoot.CFrame
+		task.wait(TP_WAIT)
+
+		KillPlayer(player)
+
+		for _ = 1, 2 do
+			GrabRelease(blobman, targetRoot)
+			task.wait(GRAB_WAIT)
+		end
+	end
+end
+
+local function StartKillAll()
+	if isRunning then return end
+	isRunning = true
+
+	if killTask then
+		task.cancel(killTask)
+		killTask = nil
+	end
+
+	killTask = task.spawn(function()
+		while isRunning do
+			pcall(ProcessAllPlayers)
+			task.wait()
+		end
+	end)
+end
+
+local function StopKillAll()
+	isRunning = false
+	if killTask then
+		task.cancel(killTask)
+		killTask = nil
+	end
+end
+
+-- =====================================================
+-- ★★★ 防御機能 (アンチキック + アンチグラブ + アンチラグ) ★★★
+-- =====================================================
+
+-- ===== アンチキック機能 =====
+shurikenAntiKickActive = false
+
+local function ClearKunai()
+    local inv = Workspace:FindFirstChild(LocalPlayer.Name.."SpawnedInToys")
+    local destroyrem = ReplicatedStorage:FindFirstChild("MenuToys") and ReplicatedStorage.MenuToys:FindFirstChild("DestroyToy")
+    if inv and destroyrem then
+        for _, v in pairs(inv:GetChildren()) do
+            if v.Name == "AntiKick" or v.Name == "NinjaShuriken" then
+                pcall(function() destroyrem:FireServer(v) end)
+            end
+        end
+    end
+end
+
+local function StartAntiKick()
+    shurikenAntiKickActive = true
+    task.spawn(function()
+        local setOwner = ReplicatedStorage:WaitForChild("GrabEvents"):WaitForChild("SetNetworkOwner")
+        local stickyEvent = ReplicatedStorage:WaitForChild("PlayerEvents"):WaitForChild("StickyPartEvent")
+        local spawnRemote = ReplicatedStorage:WaitForChild("MenuToys"):WaitForChild("SpawnToyRemoteFunction")
+        local canSpawn = LocalPlayer:WaitForChild("CanSpawnToy")
+        
+        local function getHRP()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                return LocalPlayer.Character.HumanoidRootPart
+            else
+                local character = LocalPlayer.CharacterAdded:Wait()
+                return character:WaitForChild("HumanoidRootPart")
+            end
+        end
+        
+        local function StickKunai(kunai)
+            if not kunai or not kunai:FindFirstChild("StickyPart") then return end
+            local currentHRP = getHRP()
+            if not currentHRP then return end
+            local firePart = currentHRP:FindFirstChild("FirePlayerPart") or currentHRP:WaitForChild("FirePlayerPart", 5)
+            if not firePart then return end
+            
+            for _, obj in pairs(kunai:GetChildren()) do
+                if obj:IsA("BasePart") then
+                    obj.CanTouch = false
+                    obj.CanCollide = false
+                    obj.CanQuery = false
+                    obj.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    obj.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    if obj.Name == "Pyramid" then
+                        obj.Transparency = 0
+                    elseif obj.Name == "Main" then
+                        obj.Transparency = 0
+                    else
+                        obj.Transparency = 1
+                    end
+                end
+            end
+            
+            if kunai:FindFirstChild("SoundPart") then
+                if not kunai.SoundPart:FindFirstChild("PartOwner") or kunai.SoundPart.PartOwner.Value ~= LocalPlayer.Name then
+                    pcall(function() setOwner:FireServer(kunai.SoundPart, kunai.SoundPart.CFrame) end)
+                end
+            end
+            
+            local targetCFrame = firePart.CFrame * CFrame.Angles(0, math.rad(90), math.rad(90))
+            kunai:PivotTo(targetCFrame)
+            stickyEvent:FireServer(kunai.StickyPart, firePart, CFrame.new(0,0,0) * CFrame.Angles(0,math.rad(90),math.rad(90)))
+        end
+        
+        while shurikenAntiKickActive do
+            task.wait(0.05)
+            if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("Humanoid") or LocalPlayer.Character.Humanoid.Health <= 0 then continue end
+            
+            local inv = Workspace:FindFirstChild(LocalPlayer.Name.."SpawnedInToys")
+            local kunai = inv and inv:FindFirstChild("NinjaShuriken") or (inv and inv:FindFirstChild("AntiKick"))
+            
+            if not kunai then
+                local currentHRP = getHRP()
+                if currentHRP then
+                    pcall(function()
+                        spawnRemote:InvokeServer("NinjaShuriken", currentHRP.CFrame * CFrame.new(0, 2, 2), Vector3.new(0,0,0))
+                    end)
+                end
+                task.wait(0.3)
+                inv = Workspace:FindFirstChild(LocalPlayer.Name.."SpawnedInToys")
+                kunai = inv and inv:FindFirstChild("NinjaShuriken")
+                if kunai then
+                    kunai.Name = "AntiKick"
+                    StickKunai(kunai)
+                end
+            end
+            
+            if kunai and kunai:FindFirstChild("StickyPart") then
+                local isWelded = kunai.StickyPart:FindFirstChild("StickyWeld") and kunai.StickyPart.StickyWeld.Part1 ~= nil
+                if not isWelded and kunai.StickyPart.CanTouch == true then
+                    StickKunai(kunai)
+                    kunai.Name = "AntiKick"
+                    task.wait(0.1)
+                end
+            end
+        end
+        ClearKunai()
+    end)
+end
+
+local function StopAntiKick()
+    shurikenAntiKickActive = false
+    ClearKunai()
+end
+
+-- ===== アンチグラブ機能 =====
+AntiGrabEnabled = false
+struggleEvent = nil
+isHeldValue = nil
+
+task.spawn(function()
+    local characterEventsFolder = ReplicatedStorage:FindFirstChild("CharacterEvents", 10)
+    if characterEventsFolder then
+        struggleEvent = characterEventsFolder:WaitForChild("Struggle", 5)
+    end
+    isHeldValue = LocalPlayer:FindFirstChild("IsHeld", 10)
+end)
+
+local function AntiGrabHandler()
+    if not AntiGrabEnabled then return end
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+    
+    if isHeldValue and isHeldValue.Value == true then
+        pcall(function() if struggleEvent then struggleEvent:FireServer(LocalPlayer) end end)
+        humanoidRootPart.Velocity = Vector3.zero
+        humanoidRootPart.Anchored = true
+    else
+        humanoidRootPart.Anchored = false
+    end
+end
+
+RunService.Heartbeat:Connect(AntiGrabHandler)
+
+local function StartAntiGrab()
+    AntiGrabEnabled = true
+end
+
+local function StopAntiGrab()
+    AntiGrabEnabled = false
+    local character = LocalPlayer.Character
+    if character then
+        local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+        if humanoidRootPart then humanoidRootPart.Anchored = false end
+    end
+end
+
+-- ===== アンチラグ機能 =====
+antiLagEnabled = false
+lines = 0
+lagger = nil
+
+workspace.DescendantAdded:Connect(function(d)
+    if d.Name == "GrabBeam" then
+        lines = lines + 1
+        lagger = d.Parent and d.Parent.Parent and d.Parent.Parent.Parent
+    end
+end)
+
+local function StartAntiLag()
+    antiLagEnabled = true
+    lines = 0
+    pcall(function()
+        LocalPlayer.PlayerScripts.CharacterAndBeamMove.Enabled = false
+    end)
+    
+    task.spawn(function()
+        while antiLagEnabled do
+            if lines > 100 then
+                pcall(function()
+                    LocalPlayer.PlayerScripts.CharacterAndBeamMove.Enabled = false
+                end)
+                lines = 0
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+local function StopAntiLag()
+    antiLagEnabled = false
+    pcall(function()
+        LocalPlayer.PlayerScripts.CharacterAndBeamMove.Enabled = true
+    end)
+end
+
+-- =====================================================
+-- ★★★ ブロブキック機能 (キックタブ用) ★★★
+-- =====================================================
+local selectedKickPlayer = nil
+local kickLoopEnabled = false
+
+local function getPlayerList()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            table.insert(list, plr.DisplayName .. " (" .. plr.Name .. ")")
+        end
+    end
+    return list
+end
+
+local function getPlayerFromSelection(selection)
+    if not selection then return nil end
+    local username = selection:match("%((.-)%)")
+    if username then
+        return Players:FindFirstChild(username)
+    end
+    return nil
+end
+
+-- =====================================================
+-- ★★★ Blobman Kick All 機能 (キックタブ用) ★★★
+-- =====================================================
+local KICKALL_MAX_RETRIES = 5
+local KICKALL_TP_WAIT = 0.02
+local KICKALL_GRAB_WAIT = 0.01
+local friendWhitelist = false
+local isKickAllRunning = false
+
+local function isTargetable(player)
+    if not player or player == LocalPlayer then return false end
+    if friendWhitelist then
+        local isFriend = false
+        pcall(function()
+            isFriend = LocalPlayer:IsFriendsWith(player.UserId)
+        end)
+        if isFriend then return false end
+    end
+    return true
+end
+
+local function GetAllPlayers()
+    local players = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isTargetable(player) then
+            table.insert(players, player)
+        end
+    end
+    return players
+end
+
+local function SpawnBlobmanForKickAll()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return nil end
+    
+    local spawnPos = rootPart.CFrame * CFrame.new(0, 0, -5)
+    
+    local success, err = pcall(function()
+        ReplicatedStorage.MenuToys.SpawnToyRemoteFunction:InvokeServer(
+            "CreatureBlobman",
+            spawnPos,
+            Vector3.new(0, 127, 0)
+        )
+    end)
+    
+    if not success then return nil end
+    
+    local toyFolderName = LocalPlayer.Name .. "SpawnedInToys"
+    local blobman = nil
+    local startTime = tick()
+    repeat
+        local toyFolder = Workspace:FindFirstChild(toyFolderName)
+        if toyFolder then
+            blobman = toyFolder:FindFirstChild("CreatureBlobman")
+        end
+        if blobman then break end
+        task.wait()
+    until tick() - startTime > 2
+    
+    return blobman
+end
+
+local function SitOnBlobman(blobman)
+    if not blobman then return false end
+    local seat = blobman:FindFirstChild("VehicleSeat")
+    if not seat then return false end
+    
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+    
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if rootPart then
+        rootPart.CFrame = seat.CFrame
+    end
+    
+    seat:Sit(humanoid)
+    task.wait(0.3)
+    return true
+end
+
+local function KillPlayerKickAll(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local humanoid = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+    
+    for _ = 1, KICKALL_MAX_RETRIES do
+        pcall(function()
+            humanoid.BreakJointsOnDeath = false
+            humanoid:ChangeState(Enum.HumanoidStateType.Dead)
+        end)
+        if humanoid.Health <= 0 then return true end
+        task.wait(0.01)
+    end
+    return false
+end
+
+local function GrabReleaseKickAll(blobman, targetRoot)
+    if not blobman or not targetRoot then return end
+    pcall(function()
+        local script = blobman:FindFirstChild("BlobmanSeatAndOwnerScript")
+        if script then
+            script.CreatureGrab:FireServer(
+                blobman.LeftDetector,
+                targetRoot,
+                blobman.LeftDetector.LeftWeld
+            )
+            script.CreatureRelease:FireServer(
+                blobman.LeftDetector.LeftWeld
+            )
+        end
+    end)
+end
+
+local function ExecuteBlobmanKickAll()
+    if isKickAllRunning then return end
+    isKickAllRunning = true
+    
+    local allPlayers = GetAllPlayers()
+    
+    if #allPlayers == 0 then
+        Library:Notify("⚠️ ターゲットが見つかりません", 3)
+        isKickAllRunning = false
+        return
+    end
+    
+    Library:Notify("🎯 ターゲット " .. #allPlayers .. " 人を検出", 2)
+    
+    local blobman = SpawnBlobmanForKickAll()
+    if not blobman then
+        Library:Notify("❌ Blobmanのスポーンに失敗しました", 3)
+        isKickAllRunning = false
+        return
+    end
+    
+    if not SitOnBlobman(blobman) then
+        Library:Notify("❌ Blobmanに座れませんでした", 3)
+        isKickAllRunning = false
+        return
+    end
+    
+    local char = LocalPlayer.Character
+    local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then
+        Library:Notify("❌ キャラクターが見つかりません", 3)
+        isKickAllRunning = false
+        return
+    end
+    
+    Library:Notify("🚀 キック処理を開始...", 2)
+    
+    for _, targetPlayer in ipairs(allPlayers) do
+        if not isKickAllRunning then break end
+        
+        local targetChar = targetPlayer.Character
+        if not targetChar then 
+            continue 
+        end
+        
+        local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+        if not targetRoot then 
+            continue 
+        end
+        
+        rootPart.CFrame = targetRoot.CFrame
+        task.wait(KICKALL_TP_WAIT)
+        
+        KillPlayerKickAll(targetPlayer)
+        
+        for i = 1, 3 do
+            GrabReleaseKickAll(blobman, targetRoot)
+            task.wait(KICKALL_GRAB_WAIT)
+        end
+    end
+    
+    rootPart.CFrame = CFrame.new(0, 100, 0)
+    task.wait(0.1)
+    
+    local radius = 15
+    for i, targetPlayer in ipairs(allPlayers) do
+        local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if targetRoot then
+            local angle = math.rad((i - 1) * (360 / #allPlayers))
+            local x = radius * math.cos(angle)
+            local z = radius * math.sin(angle)
+            targetRoot.CFrame = CFrame.new(x, 110, z)
+        end
+    end
+    
+    task.wait(0.1)
+    
+    for _ = 1, 2 do
+        for _, targetPlayer in ipairs(allPlayers) do
+            local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                pcall(function()
+                    ReplicatedStorage.GrabEvents.SetNetworkOwner:FireServer(targetRoot, CFrame.new(targetRoot.Position))
+                    ReplicatedStorage.GrabEvents.DestroyGrabLine:FireServer(targetRoot)
+                end)
+            end
+        end
+        task.wait(0.1)
+    end
+    
+    task.wait(0.3)
+    for _, targetPlayer in ipairs(allPlayers) do
+        local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if targetRoot then
+            pcall(function()
+                blobman.BlobmanSeatAndOwnerScript.CreatureGrab:FireServer(
+                    blobman.LeftDetector, targetRoot, blobman.LeftDetector.LeftWeld
+                )
+                blobman.BlobmanSeatAndOwnerScript.CreatureGrab:FireServer(
+                    blobman.RightDetector, targetRoot, blobman.RightDetector.RightWeld
+                )
+            end)
+        end
+    end
+    
+    task.wait(0.1)
+    
+    for _, part in ipairs(blobman:GetDescendants()) do
+        if part:IsA("BasePart") then
+            pcall(function() part.Anchored = false end)
+        end
+    end
+    
+    Library:Notify("✅ Blobman Kick All 完了！", 3)
+    isKickAllRunning = false
+end
+
+-- =====================================================
+-- ★★★ プレイヤー機能 (三人称視点 + 無限ジャンプ) ★★★
+-- =====================================================
+local infJumpEnabled = false
+
+-- 三人称視点 (プレイヤータブ用)
+local function enableThirdPersonPlayer()
+    pcall(function()
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        Camera.CameraType = Enum.CameraType.Custom
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+            Camera.CameraSubject = LocalPlayer.Character.Humanoid
+        end
+        LocalPlayer.CameraMaxZoomDistance = 1000
+        LocalPlayer.CameraMinZoomDistance = 0.5
+    end)
+end
+
+local function disableThirdPersonPlayer()
+    pcall(function()
+        LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+        Camera.CameraType = Enum.CameraType.Custom
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+            Camera.CameraSubject = LocalPlayer.Character.Humanoid
+        end
+        LocalPlayer.CameraMaxZoomDistance = 0
+        LocalPlayer.CameraMinZoomDistance = 0
+    end)
+end
+
+-- 無限ジャンプ
+UserInputService.JumpRequest:Connect(function()
+    if infJumpEnabled then
+        local character = LocalPlayer.Character
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end
+    end
+end)
+
+-- =====================================================
+-- ★★★ Main タブ (従来のデモ機能) ★★★
+-- =====================================================
+local LeftGroupBox = Tabs.Main:AddLeftGroupbox("Groupbox", "boxes")
+
+LeftGroupBox:AddToggle("MyToggle", {
+	Text = "This is a toggle",
+	Tooltip = "This is a tooltip",
+	DisabledTooltip = "I am disabled!",
+	Default = true,
+	Disabled = false,
+	Visible = true,
+	Risky = false,
+	Callback = function(Value)
+		print("[cb] MyToggle changed to:", Value)
+	end,
+})
+	:AddColorPicker("ColorPicker1", {
+		Default = Color3.new(1, 0, 0),
+		Title = "Some color1",
+		Transparency = 0,
+		Callback = function(Value)
+			print("[cb] Color changed!", Value)
+		end,
+	})
+	:AddColorPicker("ColorPicker2", {
+		Default = Color3.new(0, 1, 0),
+		Title = "Some color2",
+		Callback = function(Value)
+			print("[cb] Color changed!", Value)
+		end,
+	})
+
+Toggles.MyToggle:OnChanged(function()
+	print("MyToggle changed to:", Toggles.MyToggle.Value)
+end)
+
+Toggles.MyToggle:SetValue(false)
+
+LeftGroupBox:AddCheckbox("MyCheckbox", {
+	Text = "This is a checkbox",
+	Tooltip = "This is a tooltip",
+	DisabledTooltip = "I am disabled!",
+	Default = true,
+	Disabled = false,
+	Visible = true,
+	Risky = false,
+	Callback = function(Value)
+		print("[cb] MyCheckbox changed to:", Value)
+	end,
+})
+
+Toggles.MyCheckbox:OnChanged(function()
+	print("MyCheckbox changed to:", Toggles.MyCheckbox.Value)
+end)
+
+local MyButton = LeftGroupBox:AddButton({
+	Text = "Button",
+	Func = function()
+		print("You clicked a button!")
+	end,
+	DoubleClick = false,
+	Tooltip = "This is the main button",
+	DisabledTooltip = "I am disabled!",
+	Disabled = false,
+	Visible = true,
+	Risky = false,
+})
+
+local MyButton2 = MyButton:AddButton({
+	Text = "Sub button",
+	Func = function()
+		print("You clicked a sub button!")
+	end,
+	DoubleClick = true,
+	Tooltip = "This is the sub button",
+	DisabledTooltip = "I am disabled!",
+})
+
+LeftGroupBox:AddLabel("This is a label")
+LeftGroupBox:AddLabel("This is a label\n\nwhich wraps its text!", true)
+LeftGroupBox:AddLabel("This is a label exposed to Labels", true, "TestLabel")
+LeftGroupBox:AddLabel("SecondTestLabel", {
+	Text = "This is a label made with table options and an index",
+	DoesWrap = true,
+})
+
+LeftGroupBox:AddDivider()
+
+LeftGroupBox:AddSlider("MySlider", {
+	Text = "This is my slider!",
+	Default = 0,
+	Min = 0,
+	Max = 5,
+	Rounding = 1,
+	Compact = false,
+	Callback = function(Value)
+		print("[cb] MySlider was changed! New value:", Value)
+	end,
+	Tooltip = "I am a slider!",
+	DisabledTooltip = "I am disabled!",
+	Disabled = false,
+	Visible = true,
+})
+
+Options.MySlider:OnChanged(function()
+	print("MySlider was changed! New value:", Options.MySlider.Value)
+end)
+
+Options.MySlider:SetValue(3)
+
+LeftGroupBox:AddInput("MyTextbox", {
+	Default = "My textbox!",
+	Numeric = false,
+	Finished = false,
+	ClearTextOnFocus = true,
+	Text = "This is a textbox",
+	Tooltip = "This is a tooltip",
+	Placeholder = "Placeholder text",
+	Callback = function(Value)
+		print("[cb] Text updated. New text:", Value)
+	end,
+})
+
+Options.MyTextbox:OnChanged(function()
+	print("Text updated. New text:", Options.MyTextbox.Value)
+end)
+
+local DropdownGroupBox = Tabs.Main:AddRightGroupbox("Dropdowns")
+
+DropdownGroupBox:AddDropdown("MyDropdown", {
+	Values = { "This", "is", "a", "dropdown" },
+	Default = 1,
+	Multi = false,
+	Text = "A dropdown",
+	Tooltip = "This is a tooltip",
+	DisabledTooltip = "I am disabled!",
+	Searchable = false,
+	Callback = function(Value)
+		print("[cb] Dropdown got changed. New value:", Value)
+	end,
+	Disabled = false,
+	Visible = true,
+})
+
+Options.MyDropdown:OnChanged(function()
+	print("Dropdown got changed. New value:", Options.MyDropdown.Value)
+end)
+
+Options.MyDropdown:SetValue("This")
+
+DropdownGroupBox:AddDropdown("MySearchableDropdown", {
+	Values = { "This", "is", "a", "searchable", "dropdown" },
+	Default = 1,
+	Multi = false,
+	Text = "A searchable dropdown",
+	Tooltip = "This is a tooltip",
+	DisabledTooltip = "I am disabled!",
+	Searchable = true,
+	Callback = function(Value)
+		print("[cb] Dropdown got changed. New value:", Value)
+	end,
+	Disabled = false,
+	Visible = true,
+})
+
+LeftGroupBox:AddLabel("Color"):AddColorPicker("ColorPicker", {
+	Default = Color3.new(0, 1, 0),
+	Title = "Some color",
+	Transparency = 0,
+	Callback = function(Value)
+		print("[cb] Color changed!", Value)
+	end,
+})
+
+Options.ColorPicker:OnChanged(function()
+	print("Color changed!", Options.ColorPicker.Value)
+	print("Transparency changed!", Options.ColorPicker.Transparency)
+end)
+
+Options.ColorPicker:SetValueRGB(Color3.fromRGB(0, 255, 140))
+
+LeftGroupBox:AddLabel("Keybind"):AddKeyPicker("KeyPicker", {
+	Default = "MB2",
+	SyncToggleState = false,
+	Mode = "Toggle",
+	Text = "Auto lockpick safes",
+	NoUI = false,
+	Callback = function(Value)
+		print("[cb] Keybind clicked!", Value)
+	end,
+	ChangedCallback = function(New)
+		print("[cb] Keybind changed!", New)
+	end,
+})
+
+Options.KeyPicker:OnClick(function()
+	print("Keybind clicked!", Options.KeyPicker:GetState())
+end)
+
+Options.KeyPicker:OnChanged(function()
+	print("Keybind changed!", Options.KeyPicker.Value)
+end)
+
+task.spawn(function()
+	while true do
+		wait(1)
+		local state = Options.KeyPicker:GetState()
+		if state then
+			print("KeyPicker is being held down")
+		end
+		if Library.Unloaded then
+			break
+		end
+	end
+end)
+
+Options.KeyPicker:SetValue({ "MB2", "Hold" })
+
+local LeftGroupBox2 = Tabs.Main:AddLeftGroupbox("Groupbox #2")
+LeftGroupBox2:AddLabel(
+	"This label spans multiple lines! We're gonna run out of UI space...\nJust kidding! Scroll down!\n\n\nHello from below!",
+	true
+)
+
+local TabBox = Tabs.Main:AddRightTabbox()
+local Tab1 = TabBox:AddTab("Tab 1")
+Tab1:AddToggle("Tab1Toggle", { Text = "Tab1 Toggle" })
+
+local Tab2 = TabBox:AddTab("Tab 2")
+Tab2:AddToggle("Tab2Toggle", { Text = "Tab2 Toggle" })
+
+-- =====================================================
+-- ★★★ 防御 (Defense) タブ ★★★
+-- =====================================================
+local DefenseGroupLeft = Tabs.Defense:AddLeftGroupbox("アンチキック", "shield")
+DefenseGroupLeft:AddToggle("AntiKickToggle", {
+	Text = "アンチキック",
+	Default = false,
+	Tooltip = "キック(蹴り)対策を有効にします",
+	Callback = function(Value)
+		if Value then
+			StartAntiKick()
+		else
+			StopAntiKick()
+		end
+	end
+})
+
+DefenseGroupLeft:AddToggle("AntiGrabToggle", {
+	Text = "アンチグラブ",
+	Default = false,
+	Tooltip = "掴み対策を有効にします",
+	Callback = function(Value)
+		if Value then
+			StartAntiGrab()
+		else
+			StopAntiGrab()
+		end
+	end
+})
+
+DefenseGroupLeft:AddToggle("AntiLagToggle", {
+	Text = "アンチラグ",
+	Default = false,
+	Tooltip = "ラグ対策を有効にします",
+	Callback = function(Value)
+		if Value then
+			StartAntiLag()
+		else
+			StopAntiLag()
+		end
+	end
+})
+
+local DefenseGroupRight = Tabs.Defense:AddRightGroupbox("ステータス", "info")
+DefenseGroupRight:AddLabel("防御機能の状態を表示します")
+DefenseGroupRight:AddDivider()
+
+DefenseGroupRight:AddLabel("アンチキック: オフ", false, "AntiKickStatus")
+DefenseGroupRight:AddLabel("アンチグラブ: オフ", false, "AntiGrabStatus")
+DefenseGroupRight:AddLabel("アンチラグ: オフ", false, "AntiLagStatus")
+
+local function UpdateStatusLabels()
+	Options.AntiKickStatus:SetText("アンチキック: " .. (shurikenAntiKickActive and "オン ✓" or "オフ"))
+	Options.AntiGrabStatus:SetText("アンチグラブ: " .. (AntiGrabEnabled and "オン ✓" or "オフ"))
+	Options.AntiLagStatus:SetText("アンチラグ: " .. (antiLagEnabled and "オン ✓" or "オフ"))
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		pcall(UpdateStatusLabels)
+		if Library.Unloaded then break end
+	end
+end)
+
+DefenseGroupRight:AddDivider()
+DefenseGroupRight:AddButton({
+	Text = "全防御機能を停止",
+	Func = function()
+		if shurikenAntiKickActive then
+			StopAntiKick()
+			Toggles.AntiKickToggle:SetValue(false)
+		end
+		if AntiGrabEnabled then
+			StopAntiGrab()
+			Toggles.AntiGrabToggle:SetValue(false)
+		end
+		if antiLagEnabled then
+			StopAntiLag()
+			Toggles.AntiLagToggle:SetValue(false)
+		end
+		Library:Notify({
+			Title = "防御機能",
+			Description = "すべての防御機能を停止しました",
+			Time = 2,
+		})
+	end,
+	Tooltip = "全ての防御機能を一括で停止します",
+	Risky = true,
+})
+
+-- =====================================================
+-- ★★★ キック (Kick) タブ ★★★
+-- =====================================================
+
+-- ===== 左グループ: ブロブキック (単体) =====
+local KickLeftGroup = Tabs.Kick:AddLeftGroupbox("ブロブキック (単体)", "user")
+
+KickLeftGroup:AddDropdown("KickTargetPlayer", {
+    Values = getPlayerList(),
+    Default = "",
+    Text = "ターゲットプレイヤー",
+    Tooltip = "キックするプレイヤーを選択",
+    Searchable = true,
+    Callback = function(Value)
+        selectedKickPlayer = getPlayerFromSelection(Value)
+    end,
+})
+
+KickLeftGroup:AddButton({
+    Text = "🔄 プレイヤーリスト更新",
+    Func = function()
+        local newList = getPlayerList()
+        Options.KickTargetPlayer:SetValues(newList)
+        Library:Notify({
+            Title = "更新完了",
+            Description = "プレイヤーリストを更新しました",
+            Time = 2,
+        })
+    end,
+    Tooltip = "プレイヤー一覧を最新に更新",
+})
+
+KickLeftGroup:AddDivider()
+
+KickLeftGroup:AddToggle("BlobKick", {
+    Text = "ブロブキック",
+    Tooltip = "ブロブマンに乗った状態でターゲットを拘束・キック",
+    DisabledTooltip = "ターゲットを選択してください",
+    Default = false,
+    Risky = true,
+    Callback = function(Value)
+        if Value and not selectedKickPlayer then
+            Library:Notify({
+                Title = "エラー",
+                Description = "先にターゲットプレイヤーを選択してください",
+                Time = 3,
+            })
+            Toggles.BlobKick:SetValue(false)
+            return
+        end
+
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        local seat = hum and hum.SeatPart
+
+        if Value and (not seat or not seat.Parent or seat.Parent.Name ~= "CreatureBlobman") then
+            Library:Notify({
+                Title = "エラー",
+                Description = "ブロブマンに乗っている必要があります",
+                Time = 3,
+            })
+            Toggles.BlobKick:SetValue(false)
+            return
+        end
+
+        kickLoopEnabled = Value
+
+        if not Value then
+            Library:Notify({
+                Title = "停止",
+                Description = "ブロブキックを停止しました",
+                Time = 2,
+            })
+            return
+        end
+
+        local target = selectedKickPlayer
+
+        Library:Notify({
+            Title = "開始",
+            Description = target.DisplayName .. " をキックします",
+            Time = 3,
+        })
+
+        task.spawn(function()
+            local GE = ReplicatedStorage:WaitForChild("GrabEvents")
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChild("Humanoid")
+            local seat = hum and hum.SeatPart
+            local blob = seat.Parent
+            local blobRoot = blob:FindFirstChild("HumanoidRootPart") or blob.PrimaryPart
+            local scriptObj = blob:FindFirstChild("BlobmanSeatAndOwnerScript")
+            local CG = scriptObj and scriptObj:FindFirstChild("CreatureGrab")
+            local CD = scriptObj and scriptObj:FindFirstChild("CreatureDrop")
+            local R_Det = blob:FindFirstChild("RightDetector")
+            local R_Weld = R_Det and (R_Det:FindFirstChild("RightWeld") or R_Det:FindFirstChildWhichIsA("Weld"))
+            local SavedPos = blobRoot.CFrame
+
+            local tChar = target.Character
+            local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+
+            if tRoot and blobRoot then
+                local bringStart = tick()
+                while tick() - bringStart < 0.35 do
+                    if not kickLoopEnabled then break end
+                    pcall(function()
+                        blobRoot.CFrame = tRoot.CFrame
+                        blobRoot.Velocity = Vector3.zero
+                        if CG and R_Det then
+                            CG:FireServer(R_Det, tRoot, R_Weld)
+                        end
+                        GE.CreateGrabLine:FireServer(tRoot, Vector3.zero, tRoot.Position, false)
+                        GE.SetNetworkOwner:FireServer(tRoot, blobRoot.CFrame)
+                    end)
+                    RunService.Heartbeat:Wait()
+                end
+                pcall(function()
+                    blobRoot.CFrame = SavedPos
+                    blobRoot.Velocity = Vector3.zero
+                end)
+                task.wait(0.05)
+            end
+
+            local packetTimer = 0
+            while kickLoopEnabled do
+                if not target or not target.Parent or not target.Character then
+                    break
+                end
+
+                tChar = target.Character
+                tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+                local tHum = tChar and tChar:FindFirstChild("Humanoid")
+
+                if tRoot and tHum and tHum.Health > 0 then
+                    pcall(function()
+                        blobRoot.CFrame = SavedPos
+                        blobRoot.Velocity = Vector3.zero
+
+                        local lockPos = SavedPos * CFrame.new(0, 23, 0)
+                        tRoot.CFrame = lockPos
+                        tRoot.Velocity = Vector3.zero
+                        tRoot.RotVelocity = Vector3.zero
+
+                        if tick() - packetTimer > 0.05 then
+                            packetTimer = tick()
+                            tHum.PlatformStand = true
+                            tHum.Sit = true
+                            GE.SetNetworkOwner:FireServer(tRoot, lockPos)
+                            if R_Det then
+                                local weld = R_Det:FindFirstChild("RightWeld") or R_Det:FindFirstChildWhichIsA("Weld")
+                                if weld then
+                                    CD:FireServer(weld)
+                                end
+                            end
+                            GE.DestroyGrabLine:FireServer(tRoot)
+                            if CG and R_Det then
+                                CG:FireServer(R_Det, tRoot, R_Weld)
+                            end
+                            GE.CreateGrabLine:FireServer(tRoot, Vector3.zero, tRoot.Position, false)
+                        end
+                    end)
+                else
+                    pcall(function()
+                        if blobRoot and blobRoot.Parent then
+                            blobRoot.CFrame = SavedPos
+                            blobRoot.Velocity = Vector3.zero
+                        end
+                    end)
+                end
+
+                RunService.Heartbeat:Wait()
+            end
+
+            kickLoopEnabled = false
+            pcall(function()
+                if blobRoot and blobRoot.Parent then
+                    blobRoot.CFrame = SavedPos
+                    blobRoot.Velocity = Vector3.zero
+                end
+            end)
+
+            Toggles.BlobKick:SetValue(false)
+            Library:Notify({
+                Title = "停止",
+                Description = "ブロブキックを終了しました",
+                Time = 2,
+            })
+        end)
+    end,
+})
+
+-- ===== 右グループ: ブロブキック単体ステータス =====
+local KickRightGroup = Tabs.Kick:AddRightGroupbox("ブロブキック ステータス", "info")
+
+KickRightGroup:AddLabel("現在のターゲット:")
+KickRightGroup:AddLabel("", true, "KickTargetStatus")
+
+KickRightGroup:AddDivider()
+
+KickRightGroup:AddLabel("ステータス:")
+KickRightGroup:AddLabel("待機中", true, "KickStatusLabel")
+
+local function updateKickStatus()
+    if kickLoopEnabled then
+        Options.KickStatusLabel:SetText("🟢 実行中")
+        if selectedKickPlayer then
+            Options.KickTargetStatus:SetText(selectedKickPlayer.DisplayName .. " (" .. selectedKickPlayer.Name .. ")")
+        end
+    else
+        Options.KickStatusLabel:SetText("🔴 停止中")
+        if selectedKickPlayer then
+            Options.KickTargetStatus:SetText(selectedKickPlayer.DisplayName .. " (" .. selectedKickPlayer.Name .. ")")
+        else
+            Options.KickTargetStatus:SetText("未選択")
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if Library.Unloaded then break end
+        pcall(updateKickStatus)
+    end
+end)
+
+-- ===== 左グループ2: Blobman Kick All =====
+local KickAllLeftGroup = Tabs.Kick:AddLeftGroupbox("Blobman Kick All (全員)", "zap")
+
+KickAllLeftGroup:AddToggle("KickAllFriendWhitelist", {
+    Text = "フレンドを除外",
+    Tooltip = "フレンドをキック対象から除外します",
+    Default = false,
+    Callback = function(Value)
+        friendWhitelist = Value
+        Library:Notify("フレンド除外: " .. (Value and "ON" or "OFF"), 2)
+    end
+})
+
+KickAllLeftGroup:AddButton({
+    Text = "⚡ Blobman Kick All (1回)",
+    Func = function()
+        if isKickAllRunning then
+            Library:Notify("⚠️ 既に実行中です", 2)
+            return
+        end
+        task.spawn(ExecuteBlobmanKickAll)
+    end,
+    Tooltip = "全プレイヤーをBlobmanでキックします",
+    Risky = true,
+})
+
+KickAllLeftGroup:AddButton({
+    Text = "⏹️ 強制停止",
+    Func = function()
+        isKickAllRunning = false
+        Library:Notify("⏹️ 処理を停止しました", 2)
+    end,
+    Tooltip = "実行中の処理を強制停止します",
+})
+
+KickAllLeftGroup:AddDivider()
+
+KickAllLeftGroup:AddLabel("📊 ステータス: 停止中", true, "KickAllStatusLabel")
+
+local function updateKickAllStatus()
+    if isKickAllRunning then
+        Options.KickAllStatusLabel:SetText("📊 ステータス: 実行中 🟢")
+    else
+        Options.KickAllStatusLabel:SetText("📊 ステータス: 停止中 🔴")
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(updateKickAllStatus)
+        if Library.Unloaded then break end
+    end
+end)
+
+-- ===== 右グループ2: Blobman Kick All 情報 =====
+local KickAllRightGroup = Tabs.Kick:AddRightGroupbox("Blobman Kick All 情報", "info")
+
+KickAllRightGroup:AddLabel("🔹 全プレイヤーをBlobmanでキック")
+KickAllRightGroup:AddLabel("")
+KickAllRightGroup:AddLabel("⚙️ 処理内容:")
+KickAllRightGroup:AddLabel("1. Blobmanをスポーン")
+KickAllRightGroup:AddLabel("2. Blobmanに着席")
+KickAllRightGroup:AddLabel("3. 各ターゲットにテレポート")
+KickAllRightGroup:AddLabel("4. ターゲットをキル")
+KickAllRightGroup:AddLabel("5. グラブ攻撃を実行")
+KickAllRightGroup:AddLabel("6. 全員を高い位置に移動")
+KickAllRightGroup:AddLabel("")
+KickAllRightGroup:AddLabel("⚠️ 危険度: 高い")
+KickAllRightGroup:AddLabel("サーバー全体に影響を与えます")
+
+-- =====================================================
+-- ★★★ Kill タブ ★★★
+-- =====================================================
+local KillGroupBox = Tabs.Kill:AddLeftGroupbox("Combat Functions", "swords")
+
+KillGroupBox:AddToggle("KillAllToggle", {
+	Text = "Kill All",
+	Default = false,
+	Tooltip = "全てのプレイヤーを自動的にキルします",
+	Callback = function(Value)
+		if Value then
+			StartKillAll()
+		else
+			StopKillAll()
+		end
+	end,
+})
+
+KillGroupBox:AddToggle("ThirdPersonKillToggle", {
+	Text = "3人称視点 (Third Person)",
+	Default = false,
+	Tooltip = "視点を3人称に固定します",
+	Callback = function(Value)
+		if Value then
+			EnableThirdPersonKill()
+		else
+			DisableThirdPersonKill()
+		end
+	end,
+})
+
+KillGroupBox:AddButton({
+	Text = "Manual Kill (Target)",
+	Func = function()
+		local target = Options.KillTargetDropdown and Options.KillTargetDropdown.Value
+		if target and target ~= "None" then
+			local player = Players:FindFirstChild(target)
+			if player then
+				KillPlayer(player)
+				Library:Notify({
+					Title = "Kill",
+					Description = "Killed: " .. target,
+					Time = 2,
+				})
+			end
+		end
+	end,
+	Tooltip = "選択したターゲットをキルします",
+})
+
+local function UpdatePlayerList()
+	local playerNames = { "None" }
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			table.insert(playerNames, player.Name)
+		end
+	end
+	return playerNames
+end
+
+KillGroupBox:AddDropdown("KillTargetDropdown", {
+	Values = UpdatePlayerList(),
+	Default = 1,
+	Text = "Kill Target",
+	Tooltip = "キルするプレイヤーを選択",
+	Callback = function(Value)
+		print("Selected target:", Value)
+	end,
+})
+
+KillGroupBox:AddButton({
+	Text = "Refresh Player List",
+	Func = function()
+		local newValues = UpdatePlayerList()
+		Options.KillTargetDropdown:SetValues(newValues)
+		Library:Notify({
+			Title = "Player List",
+			Description = "Updated!",
+			Time = 1.5,
+		})
+	end,
+	Tooltip = "プレイヤーリストを更新します",
+})
+
+-- =====================================================
+-- ★★★ プレイヤー (Player) タブ ★★★
+-- =====================================================
+local PlayerGroup = Tabs.Player:AddLeftGroupbox("プレイヤー機能", "user")
+
+-- 三人称視点
+PlayerGroup:AddToggle("ThirdPersonPlayerToggle", {
+    Text = "三人称視点",
+    Tooltip = "オンにするとカメラが後ろに移動します",
+    Default = false,
+    Risky = false,
+    Callback = function(Value)
+        if Value then
+            enableThirdPersonPlayer()
+        else
+            disableThirdPersonPlayer()
+        end
+    end,
+})
+
+-- 無限ジャンプ
+PlayerGroup:AddToggle("InfJumpToggle", {
+    Text = "無限ジャンプ",
+    Tooltip = "オンにすると空中でも何度でもジャンプできます",
+    Default = false,
+    Risky = false,
+    Callback = function(Value)
+        infJumpEnabled = Value
+    end,
+})
+
+-- キャラクター再出現時の処理 (三人称視点)
+LocalPlayer.CharacterAdded:Connect(function(character)
+    task.wait(0.1)
+    if Toggles.ThirdPersonPlayerToggle and Toggles.ThirdPersonPlayerToggle.Value then
+        local hum = character:FindFirstChild("Humanoid")
+        if hum then
+            Camera.CameraSubject = hum
+        end
+    end
+end)
+
+PlayerGroup:AddDivider()
+
+-- 三人称視点キーバインド
+PlayerGroup:AddLabel("三人称視点 キーバインド")
+    :AddKeyPicker("ThirdPersonKeybind", {
+        Default = "V",
+        NoUI = false,
+        Text = "三人称視点切替",
+        Mode = "Toggle",
+        Callback = function(Value)
+            if Toggles.ThirdPersonPlayerToggle then
+                Toggles.ThirdPersonPlayerToggle:SetValue(Value)
+            end
+        end,
+    })
+
+-- 無限ジャンプキーバインド
+PlayerGroup:AddLabel("無限ジャンプ キーバインド")
+    :AddKeyPicker("InfJumpKeybind", {
+        Default = "J",
+        NoUI = false,
+        Text = "無限ジャンプ切替",
+        Mode = "Toggle",
+        Callback = function(Value)
+            if Toggles.InfJumpToggle then
+                Toggles.InfJumpToggle:SetValue(Value)
+            end
+        end,
+    })
+
+-- 右グループ: 情報
+local PlayerInfoGroup = Tabs.Player:AddRightGroupbox("情報", "info")
+
+PlayerInfoGroup:AddLabel("🔹 プレイヤー機能")
+PlayerInfoGroup:AddLabel("")
+PlayerInfoGroup:AddLabel("⚙️ 機能一覧:")
+PlayerInfoGroup:AddLabel("• 三人称視点 (Vキー)")
+PlayerInfoGroup:AddLabel("• 無限ジャンプ (Jキー)")
+PlayerInfoGroup:AddLabel("")
+PlayerInfoGroup:AddLabel("💡 ヒント:")
+PlayerInfoGroup:AddLabel("キーバインドは変更可能です")
+
+-- =====================================================
+-- ★★★ UI Settings タブ ★★★
+-- =====================================================
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu", "wrench")
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+	Default = Library.KeybindFrame.Visible,
+	Text = "Open Keybind Menu",
+	Callback = function(value)
+		Library.KeybindFrame.Visible = value
+	end,
+})
+
+MenuGroup:AddToggle("ShowCustomCursor", {
+	Text = "Custom Cursor",
+	Default = true,
+	Callback = function(Value)
+		Library.ShowCustomCursor = Value
+	end,
+})
+
+MenuGroup:AddDropdown("NotificationSide", {
+	Values = { "Left", "Right" },
+	Default = "Right",
+	Text = "Notification Side",
+	Callback = function(Value)
+		Library:SetNotifySide(Value)
+	end,
+})
+
+MenuGroup:AddDropdown("DPIDropdown", {
+	Values = { "50%", "75%", "100%", "125%", "150%", "175%", "200%" },
+	Default = "100%",
+	Text = "DPI Scale",
+	Callback = function(Value)
+		Value = Value:gsub("%%", "")
+		Library:SetDPIScale(tonumber(Value))
+	end,
+})
+
+MenuGroup:AddDivider()
+MenuGroup:AddLabel("Menu bind")
+	:AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
+
+MenuGroup:AddButton("Unload", function()
+	StopKillAll()
+	DisableThirdPersonKill()
+	StopAntiKick()
+	StopAntiGrab()
+	StopAntiLag()
+	if kickLoopEnabled then
+		kickLoopEnabled = false
+		Toggles.BlobKick:SetValue(false)
+	end
+	isKickAllRunning = false
+	disableThirdPersonPlayer()
+	infJumpEnabled = false
+	if Toggles.InfJumpToggle then
+		Toggles.InfJumpToggle:SetValue(false)
+	end
+	if Toggles.ThirdPersonPlayerToggle then
+		Toggles.ThirdPersonPlayerToggle:SetValue(false)
+	end
+	Library:Unload()
+end)
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+-- =====================================================
+-- マネージャーの設定
+-- =====================================================
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 
+	"MenuKeybind",
+	"ThirdPersonKeybind",
+	"InfJumpKeybind"
+})
+
+ThemeManager:SetFolder("TaigaHubFTAP")
+SaveManager:SetFolder("TaigaHubFTAP")
+
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+
+SaveManager:LoadAutoloadConfig()
+
+Library:OnUnload(function()
+	StopKillAll()
+	DisableThirdPersonKill()
+	StopAntiKick()
+	StopAntiGrab()
+	StopAntiLag()
+	if kickLoopEnabled then
+		kickLoopEnabled = false
+		Toggles.BlobKick:SetValue(false)
+	end
+	isKickAllRunning = false
+	disableThirdPersonPlayer()
+	infJumpEnabled = false
+	if Toggles.InfJumpToggle then
+		Toggles.InfJumpToggle:SetValue(false)
+	end
+	if Toggles.ThirdPersonPlayerToggle then
+		Toggles.ThirdPersonPlayerToggle:SetValue(false)
+	end
+	print("Taiga hub v0.1 unloaded!")
+end)
